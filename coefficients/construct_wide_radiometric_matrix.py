@@ -1,4 +1,3 @@
-import pandas as pd
 import numpy as np
 import glob
 import os 
@@ -14,7 +13,8 @@ print(files)
 
 
 for file in files:
-    # TODO double check that these values actually are correct for radiometric calibration preformed
+    # TODO double check that these values actually are correct for the radiometric calibration preformed
+
     # standard aoi values 
     bin_factor = 9
     aoi_x = 428
