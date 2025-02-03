@@ -12,6 +12,7 @@ import astropy.time
 
 import scipy.interpolate as si
 from typing import Tuple, List
+import sys # TODO this was added, and exit was replaced by sys.exit()
 
 from .utils import mat_from_quat, \
                    rotate_axis_angle, \
@@ -114,11 +115,11 @@ def interpolate_at_frame(adcs_pos_df: pd.DataFrame,
 
     if frame_ts_start < adcs_ts_start:
         print('ERROR: Frame timestamps begin earlier than ADCS data!')
-        exit(-1)
+        sys.exit(-1)
 
     if frame_ts_end > adcs_ts_end:
         print('ERROR: Frame timestamps end later than ADCS data!')
-        exit(-1)
+        sys.exit(-1)
 
     a = quatdata.values[:, 0] > flashtimes[0]
     b = quatdata.values[:, 0] < flashtimes[-1]
@@ -635,7 +636,7 @@ def geometry_computation(framepose_data: pd.DataFrame,
     if pointing_off_earth_indicator != frame_count:
 
         print('[ERROR] At least one pixel was pointing beyond the earth\'s horizon!')
-        exit(2)
+        sys.exit(2)
 
     if verbose:
         print('Interpolating pixel coordinate gaps...')

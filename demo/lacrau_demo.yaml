@@ -1,0 +1,38 @@
+lacrau:
+  description: roi
+  projection:
+    proj: stere
+    lat_0: 90
+    lat_ts: 43.5589
+    lon_0: 4.8642
+    x_0: 0
+    y_0: 0
+    ellps: bessel
+    no_defs: null
+    type: crs
+  shape:
+    height: 1110
+    width: 538
+  area_extent:
+    lower_left_xy: [-83708.52436977545, -4795658.149311927]
+    upper_right_xy: [77891.58119905631, -4462405.698253119]
+    units: m
+lacrau:
+  description: roi
+  projection:
+    proj: stere
+    lat_0: 90
+    lat_ts: 43.5589
+    lon_0: 4.8642
+    x_0: 0
+    y_0: 0
+    ellps: bessel
+    no_defs: null
+    type: crs
+  shape:
+    height: 2221
+    width: 1077
+  area_extent:
+    lower_left_xy: [-173306.06372856855, -4962836.336396403]
+    upper_right_xy: [150035.75303697362, -4296461.825459749]
+    units: m
