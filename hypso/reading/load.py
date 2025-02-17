@@ -5,6 +5,7 @@ from hypso import georeference
 from pathlib import Path
 from hypso.utils import is_integer_num
 from typing import Tuple
+import pandas as pd # TODO <-----------------remove this later
 
 EXPERIMENTAL_FEATURES = True
 
@@ -21,7 +22,7 @@ def load_l1a_nc_cube(nc_file_path: Path) -> np.ndarray:
 
     return nc_cube
 
-def load_l1a_nc_metadata(nc_file_path: Path) -> Tuple[dict, dict, dict, dict, dict]:
+def load_l1a_nc_metadata(nc_file_path: Path, hypso2=False) -> Tuple[dict, dict, dict, dict, dict]:
     """
     Load l1a.nc Hypso Capture file metadata
 
@@ -33,7 +34,7 @@ def load_l1a_nc_metadata(nc_file_path: Path) -> Tuple[dict, dict, dict, dict, di
     nc_capture_config = load_capture_config_from_nc_file(nc_file_path)
     nc_timing = load_timing_from_nc_file(nc_file_path)
     nc_target_coords = load_target_coords_from_nc_file(nc_file_path)
-    nc_adcs = load_adcs_from_nc_file(nc_file_path)
+    nc_adcs = load_adcs_from_nc_file(nc_file_path, hypso2)
     nc_dimensions = load_dimensions_from_nc_file(nc_file_path)
     nc_navigation = load_navigation_from_nc_file(nc_file_path)
 
@@ -61,7 +62,8 @@ def load_l1b_nc_cube(nc_file_path: Path) -> np.ndarray:
 
     return nc_cube
 
-def load_l1b_nc_metadata(nc_file_path: Path) -> Tuple[dict, dict, dict, dict, dict]:
+# TODO remove hypso2 flag
+def load_l1b_nc_metadata(nc_file_path: Path, hypso2=False) -> Tuple[dict, dict, dict, dict, dict]:
     """
     Load l1a.nc Hypso Capture file metadata
 
@@ -73,7 +75,7 @@ def load_l1b_nc_metadata(nc_file_path: Path) -> Tuple[dict, dict, dict, dict, di
     nc_capture_config = load_capture_config_from_nc_file(nc_file_path)
     nc_timing = load_timing_from_nc_file(nc_file_path)
     nc_target_coords = load_target_coords_from_nc_file(nc_file_path)
-    nc_adcs = load_adcs_from_nc_file(nc_file_path)
+    nc_adcs = load_adcs_from_nc_file(nc_file_path, hypso2)
     nc_dimensions = load_dimensions_from_nc_file(nc_file_path)
     nc_navigation = load_navigation_from_nc_file(nc_file_path)
 
@@ -178,8 +180,8 @@ def load_l2a_cube_from_nc_file(nc_file_path: Path) -> np.ndarray:
 
 
 
-
-def load_adcs_from_nc_file(nc_file_path: Path) -> Tuple[dict, tuple]:
+# TODO remove hypso2 flag
+def load_adcs_from_nc_file(nc_file_path: Path, hypso2=False) -> Tuple[dict, tuple]:
     """
     Get the metadata from the top folder of the data.
 
@@ -203,6 +205,29 @@ def load_adcs_from_nc_file(nc_file_path: Path) -> Tuple[dict, tuple]:
             value = group.variables[key][:]
 
             adcs[key] = value
+
+        
+        if hypso2:
+            # TODO Temp code!
+            # ---------------------------------------------------------------------------------------------
+
+            quaternion_file_h2 = Path(__file__).resolve().parents[2] / "demo/h2_quaternion.csv"
+            quaternion_data_h2 = pd.read_csv(quaternion_file_h2)
+            position_file_h2 = Path(__file__).resolve().parents[2] / "demo/h2_position.csv"
+            position_data_h2 = pd.read_csv(position_file_h2)
+
+
+            adcs['timestamps'] = np.array(quaternion_data_h2['timestamp'][:])
+            adcs['quaternion_s'] = np.array(quaternion_data_h2['quat_0'][:])
+            adcs['quaternion_x'] = np.array(quaternion_data_h2['quat_1'][:])
+            adcs['quaternion_y'] = np.array(quaternion_data_h2['quat_2'][:])
+            adcs['quaternion_z'] = np.array(quaternion_data_h2['quat_3'][:])
+            adcs['control_error'] = np.array(quaternion_data_h2['Control error [deg]'][:])
+            adcs['position_x'] = np.array(position_data_h2['eci x [m]'][:])
+            adcs['position_y'] = np.array(position_data_h2['eci y [m]'][:])
+            adcs['position_z'] = np.array(position_data_h2['eci z [m]'][:])
+
+            # ---------------------------------------
 
         adcs['adcssamples'] = len(f.dimensions['adcssamples'])
 

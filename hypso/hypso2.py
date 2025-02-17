@@ -32,6 +32,8 @@ from hypso.reading import load_l1a_nc_cube, \
                         #   load_l2a_nc_cube, \
                         #   load_l2a_nc_metadata
 
+from hypso.writing import l1a_nc_writer, l1b_nc_writer, l2a_nc_writer
+
 from satpy import Scene
 from satpy.dataset.dataid import WavelengthRange
 
@@ -330,7 +332,7 @@ class Hypso2(Hypso):
         target_coords, \
         adcs, \
         dimensions, \
-        navigation = load_l1a_nc_metadata(nc_file_path=path)
+        navigation = load_l1a_nc_metadata(nc_file_path=path, hypso2=True) # TODO remove hypso2 flag later!
         
         setattr(self, "capture_config", capture_config)
         setattr(self, "timing", timing)
@@ -369,7 +371,7 @@ class Hypso2(Hypso):
         target_coords, \
         adcs, \
         dimensions, \
-        navigation = load_l1b_nc_metadata(nc_file_path=path)
+        navigation = load_l1b_nc_metadata(nc_file_path=path, hypso2=True) # TODO remove hypso2 flag later
         
         setattr(self, "capture_config", capture_config)
         setattr(self, "timing", timing)
@@ -1076,6 +1078,12 @@ class Hypso2(Hypso):
         return scene
 
     # ... 
+
+    # Public L1a methods
+
+    def get_l1a_cube(self) -> xr.DataArray:
+
+        return self.l1a_cube
     
     # Public L1b methods
 
