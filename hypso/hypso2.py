@@ -2,28 +2,32 @@ from datetime import datetime
 from dateutil import parser
 from importlib.resources import files
 from pathlib import Path
-from typing import Union
+from typing import Literal, Union
 
 import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
+import pyproj as prj
 import xarray as xr
 
 from .hypso import Hypso
 
 from hypso.calibration import read_coeffs_from_file, \
-                              run_radiometric_calibration #, \
-                            #   run_destriping_correction, \
-                            #   run_smile_correction, \
-                            #   make_mask, \
-                            #   make_overexposed_mask, \
-                            #   get_destriping_correction_matrix, \
-                            #   run_destriping_correction_with_computed_matrix
+                              run_radiometric_calibration, \
+                              run_destriping_correction, \
+                              run_smile_correction, \
+                              make_mask, \
+                              make_overexposed_mask, \
+                              get_destriping_correction_matrix, \
+                              run_destriping_correction_with_computed_matrix
 
 from hypso.geometry import interpolate_at_frame, \
                            geometry_computation, \
                            get_nearest_pixel
+
+from hypso.georeference import georeferencing
+from hypso.georeference.utils import check_star_tracker_orientation
 
 from hypso.reading import load_l1a_nc_cube, \
                           load_l1a_nc_metadata, \
@@ -41,7 +45,22 @@ from pyresample.geometry import SwathDefinition
 
 from trollsift import Parser
 
+SUPPORTED_PRODUCT_LEVELS = ["l1a", "l1b", "l2a"]
+
+ATM_CORR_PRODUCTS = ["6sv1", "acolite", "machi"]
+CHL_EST_PRODUCTS = Literal["band_ratio", "6sv1_aqua", "acolite_aqua"]
+LAND_MASK_PRODUCTS = Literal["global", "ndwi", "threshold"]
+CLOUD_MASK_PRODUCTS = Literal["default"]
+
+DEFAULT_ATM_CORR_PRODUCT = "6sv1"
+DEFAULT_CHL_EST_PRODUCT = "band_ratio"
+DEFAULT_LAND_MASK_PRODUCT = "global"
+DEFAULT_CLOUD_MASK_PRODUCT = "default"
+
 UNIX_TIME_OFFSET = 20 # TODO: Verify offset validity. Sivert had 20 here
+
+# TODO: store latitude and longitude as xarray
+# TODO: setattr, hasattr, getattr for setting class variables, especially those from geometry
 
 class Hypso2(Hypso):
 
@@ -64,6 +83,7 @@ class Hypso2(Hypso):
         self.VERBOSE = verbose
 
         self._load_file(path=path)
+        self._load_points_file(path=points_path)
 
 
         return None
@@ -390,12 +410,205 @@ class Hypso2(Hypso):
     
     # ...
 
+    # Georeferencing functions
+
+    # TODO refactor
+    def _load_points_file(self, 
+                          path: str, 
+                          image_mode: str = None, 
+                          origin_mode: str = 'qgis',
+                          flip_lats: bool = False,
+                          flip_lons: bool = False) -> None:
+
+
+        if path:
+            path = Path(path).absolute()
+        else:
+            if self.VERBOSE:
+                print('[INFO] No georeferencing .points file provided. Skipping georeferencing.')
+            return None
+
+
+        if not origin_mode:
+            origin_mode = 'qgis'
+
+        # Compute latitude and longitudes arrays if a points file is available
+
+        if self.VERBOSE:
+            print('[INFO] Running georeferencing...')
+
+        gr = georeferencing.Georeferencer(filename=path,
+                                            cube_height=self.spatial_dimensions[0],
+                                            cube_width=self.spatial_dimensions[1],
+                                            image_mode=image_mode,
+                                            origin_mode=origin_mode)
+        
+        # Update latitude and longitude arrays with computed values from Georeferencer
+        #self.latitudes = gr.latitudes[:, ::-1]
+        #self.longitudes = gr.longitudes[:, ::-1]
+
+        self.latitudes = gr.latitudes
+        self.longitudes = gr.longitudes
+        
+        self._compute_flip()
+        self._compute_bbox()
+        self._compute_gsd()
+        self._compute_resolution()
+
+        if flip_lons:
+            self.latitudes = self.latitudes[:,::-1]
+            self.longitudes = self.longitudes[:,::-1]
+
+        if flip_lats:
+            self.latitudes = self.latitudes[::-1,:]
+            self.longitudes = self.longitudes[::-1,:]
+
+
+        self.latitudes_original = self.latitudes
+        self.longitudes_original = self.longitudes
+
+        self.georeferencing_has_run = True
+
+        return None
+    
+    def _compute_flip(self) -> None:
+
+        datacube_flipped = check_star_tracker_orientation(adcs_samples=self.adcs['adcssamples'],
+                                                         quaternion_s=self.adcs['quaternion_s'],
+                                                         quaternion_x=self.adcs['quaternion_x'],
+                                                         quaternion_y=self.adcs['quaternion_y'],
+                                                         quaternion_z=self.adcs['quaternion_z'],
+                                                         velocity_x=self.adcs['velocity_x'],
+                                                         velocity_y=self.adcs['velocity_y'],
+                                                         velocity_z=self.adcs['velocity_z'])
+
+        if not datacube_flipped:
+
+            if self.l1a_cube is not None:
+                self.l1a_cube = self.l1a_cube[:, ::-1, :]
+
+            if self.l1b_cube is not None:  
+                self.l1b_cube = self.l1b_cube[:, ::-1, :]
+                
+            if self.l2a_cube is not None:  
+                self.l2a_cube = self.l2a_cube[:, ::-1, :]
+
+
+        self.datacube_flipped = datacube_flipped
+
+        return None
+    
+    def _compute_gsd(self) -> None:
+
+        frame_count = self.frame_count
+        image_height = self.image_height
+
+        latitudes = self.latitudes
+        longitudes = self.longitudes
+
+        try:
+            bbox = self.bbox
+        except:
+            self._compute_bbox()
+
+        aoi = prj.aoi.AreaOfInterest(west_lon_degree=bbox[0],
+                                     south_lat_degree=bbox[1],
+                                     east_lon_degree=bbox[2],
+                                     north_lat_degree=bbox[3], 
+                                    )
+
+        utm_crs_list = prj.database.query_utm_crs_info(datum_name="WGS 84", area_of_interest=aoi)
+
+
+        #bbox_geodetic = [np.min(latitudes), 
+        #                 np.max(latitudes), 
+        #                 np.min(longitudes), 
+        #                 np.max(longitudes)]
+
+        #utm_crs_list = prj.database.query_utm_crs_info(datum_name="WGS 84",
+        #                                                area_of_interest=prj.aoi.AreaOfInterest(
+        #                                                west_lon_degree=bbox_geodetic[2],
+        #                                                south_lat_degree=bbox_geodetic[0],
+        #                                                east_lon_degree=bbox_geodetic[3],
+        #                                                north_lat_degree=bbox_geodetic[1], )
+        #                                            )
+        
+        if self.VERBOSE:
+            print(f'[INFO] Using UTM map: ' + utm_crs_list[0].name, 'EPSG:', utm_crs_list[0].code)
+
+        # crs_25832 = prj.CRS.from_epsg(25832) # UTM32N
+        # crs_32717 = prj.CRS.from_epsg(32717) # UTM17S
+        crs_4326 = prj.CRS.from_epsg(4326)  # Unprojected [(lat,lon), probably]
+        source_crs = crs_4326
+        destination_epsg = int(utm_crs_list[0].code)
+        destination_crs = prj.CRS.from_epsg(destination_epsg)
+        latlon_to_proj = prj.Transformer.from_crs(source_crs, destination_crs)
+
+
+        pixel_coords_map = np.zeros([frame_count, image_height, 2])
+
+        for i in range(frame_count):
+            for j in range(image_height):
+                pixel_coords_map[i, j, :] = latlon_to_proj.transform(latitudes[i, j], 
+                                                                     longitudes[i, j])
+
+        # time line x and y differences
+        a = np.diff(pixel_coords_map[:, image_height // 2, 0])
+        b = np.diff(pixel_coords_map[:, image_height // 2, 1])
+        along_track_gsd = np.sqrt(a * a + b * b)
+        along_track_mean_gsd = np.mean(along_track_gsd)
+
+        # detector line x and y differences
+        a = np.diff(pixel_coords_map[frame_count // 2, :, 0])
+        b = np.diff(pixel_coords_map[frame_count // 2, :, 1])
+        across_track_gsd = np.sqrt(a * a + b * b)
+        across_track_mean_gsd = np.mean(across_track_gsd)
+
+
+        self.along_track_gsd = along_track_gsd
+        self.across_track_gsd = across_track_gsd
+
+        self.along_track_mean_gsd = along_track_mean_gsd
+        self.across_track_mean_gsd = across_track_mean_gsd
+
+        return None
+
+    def _compute_resolution(self) -> None:
+
+        distances = [self.along_track_mean_gsd, 
+                     self.across_track_mean_gsd]
+
+        filtered_distances = [d for d in distances if d is not None]
+
+        try:
+            resolution = max(filtered_distances)
+        except ValueError:
+            resolution = 0
+
+        self.resolution = resolution
+
+        return None
+
+    def _compute_bbox(self) -> None:
+
+        lon_min = self.longitudes.min()
+        lon_max = self.longitudes.max()
+        lat_min = self.latitudes.min()
+        lat_max = self.latitudes.max()
+
+        bbox = (lon_min,lat_min,lon_max,lat_max)
+        
+        self.bbox = bbox
+
+        return None
+
+
     # Calibration functions <---------------------------------------------------------
         
     def _run_calibration(self, 
                          overwrite: bool = False,
                          rad_cal = True,
-                         smile_corr = False,
+                         smile_corr = True,
                          destriping_corr = False,
                          **kwargs) -> None:
         """
@@ -418,8 +631,8 @@ class Hypso2(Hypso):
 
         if rad_cal:
             l1b_cube = self._run_radiometric_calibration(cube=l1a_cube)
-        # if smile_corr:
-            # l1b_cube = self._run_smile_correction(cube=l1b_cube)
+        if smile_corr:
+            l1b_cube = self._run_smile_correction(cube=l1b_cube)
         # if destriping_corr:
             # l1b_cube = self._run_destriping_correction(cube=l1b_cube, **kwargs)
 
@@ -454,60 +667,60 @@ class Hypso2(Hypso):
 
         return cube
 
-    # def _run_smile_correction(self, cube: np.ndarray) -> np.ndarray:
+    def _run_smile_correction(self, cube: np.ndarray) -> np.ndarray:
 
-    #     # Smile correction
+        # Smile correction
 
-    #     if self.VERBOSE:
-    #         print("[INFO] Running smile correction...")
+        if self.VERBOSE:
+            print("[INFO] Running smile correction...")
 
-    #     #cube = self._get_flipped_cube(cube=cube)
+        #cube = self._get_flipped_cube(cube=cube)
 
-    #     cube = run_smile_correction(cube=cube, 
-    #                                 smile_coeffs=self.smile_coeffs)
+        cube = run_smile_correction(cube=cube, 
+                                    smile_coeffs=self.smile_coeffs)
 
-    #     #cube = self._get_flipped_10cube(cube=cube)
+        #cube = self._get_flipped_10cube(cube=cube)
 
-    #     return cube
+        return cube
 
-    # def _run_destriping_correction(self, cube: np.ndarray, compute_destriping_matrix=False) -> np.ndarray:
-    #     """
-    #     Apply destriping correction to L1a datacube.
+    def _run_destriping_correction(self, cube: np.ndarray, compute_destriping_matrix=False) -> np.ndarray:
+        """
+        Apply destriping correction to L1a datacube.
 
-    #     :param cube: Radiometrically and smile corrected L1a datacube.
+        :param cube: Radiometrically and smile corrected L1a datacube.
 
-    #     :return: Destriped datacube.
-    #     """
+        :return: Destriped datacube.
+        """
 
-    #     if self.VERBOSE:
-    #         print("[INFO] Running destriping correction...")
+        if self.VERBOSE:
+            print("[INFO] Running destriping correction...")
 
-    #     #cube = self._get_flipped_cube(cube=cube)
+        #cube = self._get_flipped_cube(cube=cube)
 
-    #     if compute_destriping_matrix:
-    #         water_mask = make_mask(cube=cube, sat_val_scale=0.25)
+        if compute_destriping_matrix:
+            water_mask = make_mask(cube=cube, sat_val_scale=0.25)
             
-    #         #overexposed_mask = make_overexposed_mask(cube=cube)
-    #         #overexposed_mask = overexposed_mask.astype(bool)
-    #         #self.water_mask = water_mask
-    #         #self.overexposed_mask = overexposed_mask
-    #         #mask = water_mask | ~overexposed_mask
-    #         #mask = np.full(self.spatial_dimensions, False)
-    #         #self.mask = mask
+            #overexposed_mask = make_overexposed_mask(cube=cube)
+            #overexposed_mask = overexposed_mask.astype(bool)
+            #self.water_mask = water_mask
+            #self.overexposed_mask = overexposed_mask
+            #mask = water_mask | ~overexposed_mask
+            #mask = np.full(self.spatial_dimensions, False)
+            #self.mask = mask
 
-    #         self.destriping_coeffs = get_destriping_correction_matrix(cube, water_mask=water_mask)
+            self.destriping_coeffs = get_destriping_correction_matrix(cube, water_mask=water_mask)
 
-    #         cube = run_destriping_correction_with_computed_matrix(cube=cube, 
-    #                                      destriping_coeffs=self.destriping_coeffs)
+            cube = run_destriping_correction_with_computed_matrix(cube=cube, 
+                                         destriping_coeffs=self.destriping_coeffs)
             
-    #     else:
+        else:
 
-    #         cube = run_destriping_correction(cube=cube, destriping_coeffs=self.destriping_coeffs[:,:])
-    #         #cube = run_destriping_correction(cube=cube, destriping_coeffs=self.destriping_coeffs[:,::-1])
+            cube = run_destriping_correction(cube=cube, destriping_coeffs=self.destriping_coeffs[:,:])
+            #cube = run_destriping_correction(cube=cube, destriping_coeffs=self.destriping_coeffs[:,::-1])
         
-    #     #cube = self._get_flipped_cube(cube=cube)
+        #cube = self._get_flipped_cube(cube=cube)
 
-    #     return cube
+        return cube
 
     def _set_calibration_coeffs(self) -> None:
         """
@@ -518,8 +731,8 @@ class Hypso2(Hypso):
         """
         
         self._set_radiometric_coeffs()
-        # self._set_smile_coeffs()
-        # self._set_destriping_coeffs()
+        self._set_smile_coeffs()
+        self._set_destriping_coeffs()
         self._set_spectral_coeffs()
         
         return None
@@ -535,27 +748,27 @@ class Hypso2(Hypso):
 
         return None
 
-    # def _set_smile_coeffs(self) -> None:
-    #     """
-    #     Set the smile calibration coefficients included in the package.
+    def _set_smile_coeffs(self) -> None:
+        """
+        Set the smile calibration coefficients included in the package.
 
-    #     :return: None.
-    #     """
+        :return: None.
+        """
 
-    #     self.smile_coeffs = read_coeffs_from_file(self.smile_coeff_file)
+        self.smile_coeffs = read_coeffs_from_file(self.smile_coeff_file)
 
-    #     return None
+        return None
     
-    # def _set_destriping_coeffs(self) -> None:
-    #     """
-    #     Set the destriping calibration coefficients included in the package.
+    def _set_destriping_coeffs(self) -> None:
+        """
+        Set the destriping calibration coefficients included in the package.
 
-    #     :return: None.
-    #     """
+        :return: None.
+        """
 
-    #     self.destriping_coeffs = read_coeffs_from_file(self.destriping_coeff_file)
+        self.destriping_coeffs = read_coeffs_from_file(self.destriping_coeff_file)
 
-    #     return None
+        return None
     
     def _set_spectral_coeffs(self) -> None:
         """
@@ -577,8 +790,8 @@ class Hypso2(Hypso):
         """
 
         self._set_rad_coeff_file()
-        # self._set_smile_coeff_file()
-        # self._set_destriping_coeff_file()
+        self._set_smile_coeff_file()
+        self._set_destriping_coeff_file()
         self._set_spectral_coeff_file()
 
         return None
@@ -625,86 +838,87 @@ class Hypso2(Hypso):
 
         return None
 
-    # def _set_smile_coeff_file(self, smile_coeff_file: Union[str, Path, None] = None) -> None:
+    def _set_smile_coeff_file(self, smile_coeff_file: Union[str, Path, None] = None) -> None:
 
-    #     """
-    #     Set the absolute path for the smile coefficients based on the detected capture type (wide, nominal, or custom).
+        """
+        Set the absolute path for the smile coefficients based on the detected capture type (wide, nominal, or custom).
 
-    #     :param smile_coeff_file: Path to smile coefficients file (optional)
+        :param smile_coeff_file: Path to smile coefficients file (optional)
 
-    #     :return: None.
-    #     """
+        :return: None.
+        """
 
-    #     if smile_coeff_file:
-    #         self.smile_coeff_file = smile_coeff_file
-    #         return None
+        if smile_coeff_file:
+            self.smile_coeff_file = smile_coeff_file
+            return None
 
-    #     match self.capture_type:
+        match self.capture_type:
 
-    #         case "custom":
-    #             #csv_file_smile = "spectral_calibration_matrix_HYPSO-1_full_v1.csv" 
-    #             npz_file_smile = "spectral_calibration_matrix_HYPSO-1_full_v1.npz"  
+            case "custom":
+                #csv_file_smile = "spectral_calibration_matrix_HYPSO-1_full_v1.csv" 
+                npz_file_smile = None
 
-    #         case "nominal":
-    #             #csv_file_smile = "smile_correction_matrix_HYPSO-1_nominal_v1.csv"
-    #             npz_file_smile = "smile_correction_matrix_HYPSO-1_nominal_v1.npz"
+            case "nominal":
+                #csv_file_smile = "smile_correction_matrix_HYPSO-1_nominal_v1.csv"
+                npz_file_smile = None
 
-    #         case "wide":
-    #             #csv_file_smile = "smile_correction_matrix_HYPSO-1_wide_v1.csv"
-    #             npz_file_smile = "smile_correction_matrix_HYPSO-1_wide_v1.npz"
+            case "wide":
+                #csv_file_smile = "smile_correction_matrix_HYPSO-1_wide_v1.csv"
+                # npz_file_smile = "smile_correction_matrix_HYPSO-1_wide_v1.npz"
+                npz_file_smile = "smile_correction_matrix_HYPSO-2_wide.npz"
 
-    #         case _:
-    #             npz_file_smile = None
+            case _:
+                npz_file_smile = None
 
-    #     if npz_file_smile:
-    #         smile_coeff_file = files('hypso.calibration').joinpath(f'data/{npz_file_smile}')
-    #     else:
-    #         smile_coeff_file = npz_file_smile
+        if npz_file_smile:
+            smile_coeff_file = files('hypso.calibration').joinpath(f'hypso2_data/{npz_file_smile}')
+        else:
+            smile_coeff_file = npz_file_smile
 
-    #     self.smile_coeff_file = smile_coeff_file
+        self.smile_coeff_file = smile_coeff_file
 
-    #     return None
+        return None
 
-    # def _set_destriping_coeff_file(self, destriping_coeff_file: Union[str, Path, None] = None) -> None:
+    def _set_destriping_coeff_file(self, destriping_coeff_file: Union[str, Path, None] = None) -> None:
 
-    #     """
-    #     Set the absolute path for the destriping coefficients based on the detected capture type (wide, nominal, or custom).
+        """
+        Set the absolute path for the destriping coefficients based on the detected capture type (wide, nominal, or custom).
 
-    #     :param destriping_coeff_file: Path to destriping coefficients file (optional)
+        :param destriping_coeff_file: Path to destriping coefficients file (optional)
 
-    #     :return: None.
-    #     """
+        :return: None.
+        """
 
-    #     if destriping_coeff_file:
-    #         self.destriping_coeff_file = destriping_coeff_file
-    #         return None
+        if destriping_coeff_file:
+            self.destriping_coeff_file = destriping_coeff_file
+            return None
 
-    #     match self.capture_type:
+        match self.capture_type:
 
-    #         case "custom":
-    #             #csv_file_destriping = None
-    #             npz_file_destriping = None
+            case "custom":
+                #csv_file_destriping = None
+                npz_file_destriping = None
 
-    #         case "nominal":
-    #             #csv_file_destriping = "destriping_matrix_HYPSO-1_nominal_v1.csv"
-    #             npz_file_destriping = "destriping_matrix_HYPSO-1_nominal_v1.npz"
+            case "nominal":
+                #csv_file_destriping = "destriping_matrix_HYPSO-1_nominal_v1.csv"
+                npz_file_destriping = "destriping_matrix_HYPSO-1_nominal_v1.npz"
 
-    #         case "wide":
-    #             #csv_file_destriping = "destriping_matrix_HYPSO-1_wide_v1.csv"
-    #             npz_file_destriping = "destriping_matrix_HYPSO-1_wide_v1.npz"
+            case "wide":
+                #csv_file_destriping = "destriping_matrix_HYPSO-1_wide_v1.csv"
+                npz_file_destriping = "destriping_matrix_HYPSO-1_wide_v1.npz"
 
-    #         case _:
-    #             #csv_file_destriping = None
-    #             npz_file_destriping = None
+            case _:
+                #csv_file_destriping = None
+                npz_file_destriping = None
 
-    #     if npz_file_destriping:
-    #         destriping_coeff_file = files('hypso.calibration').joinpath(f'data/{npz_file_destriping}')
-    #     else:
-    #         destriping_coeff_file = None
+        if npz_file_destriping:
+            destriping_coeff_file = files('hypso.calibration').joinpath(f'hypso1_data/{npz_file_destriping}') #--------------- TODO remember to update
+        else:
+            destriping_coeff_file = None
 
-    #     self.destriping_coeff_file = destriping_coeff_file
+        self.destriping_coeff_file = destriping_coeff_file
 
-    #     return None
+        return None
 
     def _set_spectral_coeff_file(self, spectral_coeff_file: Union[str, Path, None] = None) -> None:
         """
@@ -903,7 +1117,9 @@ class Hypso2(Hypso):
         return scene
 
     def _generate_latlons(self) -> tuple[xr.DataArray, xr.DataArray]:
-
+        
+        print(self.latitudes)
+        print(self.dim_names_2d)
         latitudes = xr.DataArray(self.latitudes, dims=self.dim_names_2d)
         longitudes = xr.DataArray(self.longitudes, dims=self.dim_names_2d)
 
@@ -1079,6 +1295,24 @@ class Hypso2(Hypso):
 
     # ... 
 
+    # Public functions
+
+    def load_file(self, path: str = None) -> None:
+
+        if path:
+            self._load_file(path=path)
+
+        return None
+    
+
+    def load_points_file(self, path: str = None, image_mode=None, origin_mode=None, flip_lats=False, flip_lons=False) -> None:
+
+        if path:
+            self._load_points_file(path=path, image_mode=image_mode, origin_mode=origin_mode, flip_lats=flip_lats, flip_lons=flip_lons)
+
+        return None
+    
+
     # Public L1a methods
 
     def get_l1a_cube(self) -> xr.DataArray:
@@ -1241,8 +1475,146 @@ class Hypso2(Hypso):
 
         return None
     
-        # Public top of atmosphere (TOA) reflectance methods
+    # Public georeferencing functions
 
+    # TODO
+    def load_georeferencing(self, path: str) -> None:
+
+        return None
+    
+    # TODO
+    def generate_georeferencing(self) -> None:
+
+        return None
+    
+    # TODO
+    def get_ground_control_points(self) -> None:
+
+        return None
+
+    # TODO
+    def write_georeferencing(self, path: str) -> None:
+
+        return None
+    
+
+    # Public geometry functions
+
+    # TODO
+    def load_geometry(self, path: str) -> None:
+
+        return None
+
+    def generate_geometry(self) -> None:
+
+        self._run_geometry()
+
+        return None
+
+    # TODO
+    def write_geometry(self, path: str) -> None:
+
+        return None
+
+
+    # Public land mask methods
+
+    # TODO
+    def load_land_mask(self, path: str) -> None:
+
+        return None
+
+    def generate_land_mask(self, land_mask_name: LAND_MASK_PRODUCTS = DEFAULT_LAND_MASK_PRODUCT, **kwargs) -> None:
+
+        self._run_land_mask(land_mask_name=land_mask_name, **kwargs)
+
+        return None
+
+    def get_land_mask(self) -> xr.DataArray:
+
+        return self.land_mask
+
+    # TODO
+    def write_land_mask(self, path: str) -> None:
+
+        return None
+
+
+    # Public cloud mask methods
+
+    # TODO
+    def load_cloud_mask(self, path: str) -> None:
+
+        return None
+
+    def generate_cloud_mask(self, cloud_mask_name: CLOUD_MASK_PRODUCTS = DEFAULT_CLOUD_MASK_PRODUCT, **kwargs):
+
+        self._run_cloud_mask(cloud_mask_name=cloud_mask_name, **kwargs)
+
+        return None
+
+    def get_cloud_mask(self) -> xr.DataArray:
+
+        return self.cloud_mask
+    
+    # TODO
+    def write_cloud_mask(self, path: str) -> None:
+
+        return None
+
+
+    # Public unified mask methods
+
+    def get_unified_mask(self) -> xr.DataArray:
+
+        return self.unified_mask
+
+
+    # Public chlorophyll methods
+
+    # TODO
+    def load_chlorophyll_estimates(self, path: str) -> None:
+
+        return None
+
+    def generate_chlorophyll_estimates(self, 
+                                       product_name: str = DEFAULT_CHL_EST_PRODUCT,
+                                       model: Union[str, Path] = None,
+                                       factor: float = 0.1
+                                       ) -> None:
+
+        self._run_chlorophyll_estimation(product_name=product_name, model=model, factor=factor)
+
+    def get_chlorophyll_estimates(self, product_name: str = DEFAULT_CHL_EST_PRODUCT,
+                                 ) -> np.ndarray:
+
+        key = product_name.lower()
+
+        return self.chl[key]
+
+
+    # TODO
+    def write_chlorophyll_estimates(self, path: str) -> None:
+
+        return None
+    
+
+
+    # Public custom products methods
+    
+    # TODO
+    def load_products(self, path: str) -> None:
+
+        return None
+
+    # TODO
+    def write_products(self, path: str) -> None:
+
+        return None
+
+
+
+    # Public top of atmosphere (TOA) reflectance methods
 
     # TODO
     def load_toa_reflectance(self, path: str) -> None:
@@ -1263,21 +1635,42 @@ class Hypso2(Hypso):
         """
 
         return self.toa_reflectance_cube
-    
+
+
+    # TODO
+    def write_toa_reflectance(self, path: str) -> None:
+        
+        return None
+
+
+    def get_l1a_satpy_scene(self) -> Scene:
+
+        return self._generate_l1a_satpy_scene()
+
     def get_l1b_satpy_scene(self) -> Scene:
 
         return self._generate_l1b_satpy_scene()
+
+    def get_l2a_satpy_scene(self) -> Scene:
+
+        return self._generate_l2a_satpy_scene()
     
-    # ...
+    def get_toa_reflectance_satpy_scene(self) -> Scene:
 
-    def generate_geometry(self) -> None:
+        return self._generate_toa_reflectance_satpy_scene()
 
-        self._run_geometry()
+    def get_chlorophyll_estimates_satpy_scene(self) -> Scene:
 
-        return None
+        return self._generate_chlorophyll_satpy_scene()
 
-    # ...
+    def get_products_satpy_scene(self) -> Scene:
 
+        return self._generate_products_satpy_scene()
+
+    def get_bbox(self) -> tuple:
+        
+        return self.bbox
+    
     def get_closest_wavelength_index(self, wavelength: Union[float, int]) -> int:
 
         wavelengths = np.array(self.wavelengths)

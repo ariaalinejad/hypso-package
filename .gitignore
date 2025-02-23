@@ -12,3 +12,4 @@ __pycache__/
 /hypso.egg-info/
 /hypso.egg-info/*
 /hypso/_version.py
+/demo/h1_data.mat

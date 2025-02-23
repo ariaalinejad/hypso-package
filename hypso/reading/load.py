@@ -217,15 +217,15 @@ def load_adcs_from_nc_file(nc_file_path: Path, hypso2=False) -> Tuple[dict, tupl
             position_data_h2 = pd.read_csv(position_file_h2)
 
 
-            adcs['timestamps'] = np.array(quaternion_data_h2['timestamp'][:])
-            adcs['quaternion_s'] = np.array(quaternion_data_h2['quat_0'][:])
-            adcs['quaternion_x'] = np.array(quaternion_data_h2['quat_1'][:])
-            adcs['quaternion_y'] = np.array(quaternion_data_h2['quat_2'][:])
-            adcs['quaternion_z'] = np.array(quaternion_data_h2['quat_3'][:])
-            adcs['control_error'] = np.array(quaternion_data_h2['Control error [deg]'][:])
-            adcs['position_x'] = np.array(position_data_h2['eci x [m]'][:])
-            adcs['position_y'] = np.array(position_data_h2['eci y [m]'][:])
-            adcs['position_z'] = np.array(position_data_h2['eci z [m]'][:])
+            adcs['timestamps'] = np.array(quaternion_data_h2['timestamp'][:])[:-2]
+            adcs['quaternion_s'] = np.array(quaternion_data_h2['quat_0'][:])[:-2]
+            adcs['quaternion_x'] = np.array(quaternion_data_h2['quat_1'][:])[:-2]
+            adcs['quaternion_y'] = np.array(quaternion_data_h2['quat_2'][:])[:-2]
+            adcs['quaternion_z'] = np.array(quaternion_data_h2['quat_3'][:])[:-2]
+            adcs['control_error'] = np.array(quaternion_data_h2['Control error [deg]'][:])[:-2]
+            adcs['position_x'] = np.array(position_data_h2['eci x [m]'][:])[:-2]
+            adcs['position_y'] = np.array(position_data_h2['eci y [m]'][:])[:-2]
+            adcs['position_z'] = np.array(position_data_h2['eci z [m]'][:])[:-2]
 
             # ---------------------------------------
 
